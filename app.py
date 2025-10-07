@@ -25,7 +25,6 @@ def create_fresh_model():
     if os.path.exists(old_model_file):
         try:
             os.remove(old_model_file)
-            st.info("🔄 Removed incompatible old model file.")
         except:
             pass
     
@@ -140,6 +139,30 @@ def load_model():
         st.warning(f"Could not load existing model: {e}. Creating a new optimized model...")
         return create_fresh_model()
 
+def safe_dataframe_display(df, description=""):
+    """Safely display dataframe with proper type handling to avoid PyArrow errors."""
+    if df.empty:
+        st.info(f"No {description} data available.")
+        return
+    
+    try:
+        # Create a safe copy for display
+        display_df = df.copy()
+        
+        # Convert all columns to string to avoid PyArrow issues
+        for col in display_df.columns:
+            display_df[col] = display_df[col].astype(str)
+            # Replace NaN strings with empty string
+            display_df[col] = display_df[col].replace('nan', '').replace('None', '')
+        
+        st.dataframe(display_df, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Error displaying {description}: {str(e)}")
+        # Fallback: show basic information
+        st.write(f"Total records: {len(df)}")
+        st.write("Columns:", list(df.columns))
+
 def load_history():
     """Load existing history CSV or create empty DataFrame."""
     HISTORY_FILE = os.path.join(os.path.dirname(__file__), "tenant_history.csv")
@@ -156,6 +179,13 @@ def load_history():
             for col in required_columns:
                 if col not in history_df.columns:
                     history_df[col] = None
+            
+            # Convert numeric columns safely
+            numeric_columns = ['BHK', 'Size', 'Bathroom', 'Predicted Rent', 'Actual Rent', 'Security Deposit']
+            for col in numeric_columns:
+                if col in history_df.columns:
+                    history_df[col] = pd.to_numeric(history_df[col], errors='coerce').fillna(0)
+            
             return history_df, HISTORY_FILE
         except Exception as e:
             st.warning(f"Error loading history file: {e}. Creating new history...")
@@ -187,11 +217,18 @@ def load_payment_history():
                 if col not in payment_df.columns:
                     payment_df[col] = None
             
-            # Safely convert date columns
-            if 'Payment Date' in payment_df.columns and len(payment_df) > 0:
-                payment_df['Payment Date'] = pd.to_datetime(payment_df['Payment Date'], errors='coerce')
-            if 'Due Date' in payment_df.columns and len(payment_df) > 0:
-                payment_df['Due Date'] = pd.to_datetime(payment_df['Due Date'], errors='coerce')
+            # Convert numeric columns safely
+            if 'Amount' in payment_df.columns:
+                payment_df['Amount'] = pd.to_numeric(payment_df['Amount'], errors='coerce').fillna(0)
+            if 'Late Days' in payment_df.columns:
+                payment_df['Late Days'] = pd.to_numeric(payment_df['Late Days'], errors='coerce').fillna(0)
+            
+            # Safely handle date columns - store as string for compatibility
+            date_columns = ['Payment Date', 'Due Date']
+            for col in date_columns:
+                if col in payment_df.columns and len(payment_df) > 0:
+                    # Convert to string to avoid datetime issues
+                    payment_df[col] = payment_df[col].astype(str)
                 
             return payment_df, PAYMENT_FILE
         except Exception as e:
@@ -413,31 +450,14 @@ def show_rent_prediction(model, encoders, history_df, HISTORY_FILE):
                 st.error(f"Error making prediction: {str(e)}")
                 st.info("Please check your input values and try again. Using default prediction model.")
 
-# ... (Keep the rest of the functions exactly the same as in the previous working version)
-# [Include show_tenant_management, show_payment_tracking, show_analytics_dashboard functions here]
-# They remain unchanged from the previous working version
-
 def show_tenant_management(history_df, HISTORY_FILE):
     """Tenant management page."""
     st.header("👥 Tenant Management")
     
     if not history_df.empty:
-        # Display current tenants
+        # Display current tenants using safe display function
         st.subheader("Current Tenants")
-        
-        # Clean the data for display
-        display_df = history_df.copy()
-        if 'Actual Rent' in display_df.columns:
-            display_df['Actual Rent'] = display_df['Actual Rent'].fillna(display_df['Predicted Rent'])
-        
-        display_columns = ['Tenant Name', 'Phone Number', 'City', 'Area Locality', 
-                         'Predicted Rent', 'Actual Rent', 'Contract Start', 'Payment Method']
-        available_columns = [col for col in display_columns if col in display_df.columns]
-        
-        if available_columns:
-            st.dataframe(display_df[available_columns], use_container_width=True)
-        else:
-            st.dataframe(display_df, use_container_width=True)
+        safe_dataframe_display(history_df, "tenant")
         
         # Tenant actions
         col1, col2 = st.columns(2)
@@ -445,15 +465,22 @@ def show_tenant_management(history_df, HISTORY_FILE):
         with col1:
             st.subheader("Update Tenant Info")
             if len(history_df) > 0:
-                tenant_index = st.selectbox("Select Tenant", range(len(history_df)), 
-                                          format_func=lambda x: f"{history_df.iloc[x].get('Tenant Name', 'Unknown')} - {history_df.iloc[x].get('Phone Number', 'No Phone')}")
+                # Create tenant options safely
+                tenant_options = []
+                for i in range(len(history_df)):
+                    tenant_name = history_df.iloc[i].get('Tenant Name', f'Tenant {i+1}')
+                    phone = history_df.iloc[i].get('Phone Number', 'No Phone')
+                    tenant_options.append(f"{tenant_name} - {phone}")
+                
+                selected_tenant = st.selectbox("Select Tenant", range(len(history_df)), 
+                                             format_func=lambda x: tenant_options[x])
                 
                 if st.button("Update Payment Method"):
                     new_method = st.selectbox("Payment Method", 
                                             ["Mobile Money", "Bank Transfer", "Cash", "Other"])
-                    history_df.at[tenant_index, 'Payment Method'] = new_method
+                    history_df.at[selected_tenant, 'Payment Method'] = new_method
                     history_df.to_csv(HISTORY_FILE, index=False)
-                    st.success(f"Updated payment method for {history_df.iloc[tenant_index].get('Tenant Name', 'Unknown')}")
+                    st.success(f"Updated payment method for {tenant_options[selected_tenant]}")
         
         with col2:
             st.subheader("Delete Tenant Record")
@@ -467,6 +494,7 @@ def show_tenant_management(history_df, HISTORY_FILE):
                         history_df.reset_index(drop=True, inplace=True)
                         history_df.to_csv(HISTORY_FILE, index=False)
                         st.success(f"Record for {tenant_name} deleted successfully.")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Error deleting record: {str(e)}")
     else:
@@ -483,7 +511,7 @@ def show_payment_tracking(history_df, payment_df, PAYMENT_FILE):
             st.subheader("Record New Payment")
             tenant_options = []
             for i in range(len(history_df)):
-                tenant_name = history_df.iloc[i].get('Tenant Name', f'Tenant {i}')
+                tenant_name = history_df.iloc[i].get('Tenant Name', f'Tenant {i+1}')
                 actual_rent = history_df.iloc[i].get('Actual Rent', history_df.iloc[i].get('Predicted Rent', 0))
                 tenant_options.append((i, f"{tenant_name} - RWF {actual_rent:,.0f}"))
             
@@ -511,8 +539,8 @@ def show_payment_tracking(history_df, payment_df, PAYMENT_FILE):
                         new_payment = pd.DataFrame({
                             'Tenant Name': [tenant_data.get('Tenant Name', 'Unknown')],
                             'Phone Number': [tenant_data.get('Phone Number', 'Unknown')],
-                            'Payment Date': [payment_date],
-                            'Due Date': [due_date],
+                            'Payment Date': [str(payment_date)],  # Store as string
+                            'Due Date': [str(due_date)],  # Store as string
                             'Amount': [amount],
                             'Payment Method': [payment_method],
                             'Status': [status],
@@ -523,6 +551,7 @@ def show_payment_tracking(history_df, payment_df, PAYMENT_FILE):
                         payment_df = pd.concat([payment_df, new_payment], ignore_index=True)
                         payment_df.to_csv(PAYMENT_FILE, index=False)
                         st.success(f"Payment recorded! Receipt: {new_payment['Receipt Number'].iloc[0]}")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Error recording payment: {str(e)}")
         
@@ -530,24 +559,23 @@ def show_payment_tracking(history_df, payment_df, PAYMENT_FILE):
             st.subheader("Recent Payments")
             if not payment_df.empty:
                 try:
-                    # Sort by Payment Date if it exists and has valid data
-                    if 'Payment Date' in payment_df.columns and not payment_df['Payment Date'].isna().all():
-                        recent_payments = payment_df.sort_values('Payment Date', ascending=False).head(10)
-                    else:
-                        recent_payments = payment_df.head(10)
-                    st.dataframe(recent_payments, use_container_width=True)
+                    # Use safe display function
+                    safe_dataframe_display(payment_df, "payment")
                     
                     # Payment statistics
                     if 'Status' in payment_df.columns and not payment_df['Status'].isna().all():
-                        on_time_rate = (payment_df['Status'] == 'On Time').mean() * 100
-                        st.metric("On-Time Payment Rate", f"{on_time_rate:.1f}%")
+                        valid_status = payment_df['Status'].dropna()
+                        if len(valid_status) > 0:
+                            on_time_rate = (valid_status == 'On Time').mean() * 100
+                            st.metric("On-Time Payment Rate", f"{on_time_rate:.1f}%")
                     
                     if 'Late Days' in payment_df.columns and not payment_df['Late Days'].isna().all():
-                        avg_late_days = payment_df['Late Days'].mean()
-                        st.metric("Average Late Days", f"{avg_late_days:.1f} days")
+                        valid_late_days = pd.to_numeric(payment_df['Late Days'], errors='coerce').dropna()
+                        if len(valid_late_days) > 0:
+                            avg_late_days = valid_late_days.mean()
+                            st.metric("Average Late Days", f"{avg_late_days:.1f} days")
                 except Exception as e:
                     st.error(f"Error displaying payment data: {str(e)}")
-                    st.dataframe(payment_df, use_container_width=True)
             else:
                 st.info("No payments recorded yet.")
     
@@ -601,7 +629,7 @@ def show_analytics_dashboard(history_df, payment_df):
                     rent_col = 'Predicted Rent'
                     
                 city_rent = history_df.groupby('City')[rent_col].mean().reset_index()
-                st.dataframe(city_rent, use_container_width=True)
+                safe_dataframe_display(city_rent, "rent by city")
             except Exception as e:
                 st.info("Unable to display rent by city data")
     
@@ -611,7 +639,7 @@ def show_analytics_dashboard(history_df, payment_df):
             try:
                 payment_summary = payment_df['Payment Method'].value_counts().reset_index()
                 payment_summary.columns = ['Payment Method', 'Count']
-                st.dataframe(payment_summary, use_container_width=True)
+                safe_dataframe_display(payment_summary, "payment methods")
             except Exception as e:
                 st.info("Unable to display payment methods summary")
         else:
@@ -623,7 +651,7 @@ def show_analytics_dashboard(history_df, payment_df):
         try:
             payment_status = payment_df['Status'].value_counts().reset_index()
             payment_status.columns = ['Status', 'Count']
-            st.dataframe(payment_status, use_container_width=True)
+            safe_dataframe_display(payment_status, "payment performance")
         except Exception as e:
             st.info("Unable to display payment performance data")
 
